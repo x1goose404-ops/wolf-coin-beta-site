@@ -1,0 +1,35 @@
+# Wolf Coin BETA — LiteSVM test evidence (2026-11-04T20:31:11Z)
+# program: wolf_nft L3MrpyJhTLrJv57c2BcFH3vBbrrCnsakfwn6wHvzTz5 (source sha256 14ee01a1ef0d57087ffd81ca033b166c6b9b9003aff697ffa1b1a3076882d5e7)
+# source sha256: 14ee01a1ef0d57087ffd81ca033b166c6b9b9003aff697ffa1b1a3076882d5e7
+# litesvm .so sha256: 1dbbf4cbd2c784dac5e06767e4e423ceb21514caabf77cfe0ffb66fce55ab7b3  (SBPF v1 build)
+# production .so sha256: e75bb7de952c1e203011cdbe125cca10d16c78f9218c4a269c19298e85b4fc05 (SBPF v3 build)
+
+running 12 tests
+test t09_failed_redeem_is_atomic ... ok
+test t01_mint_then_redeem_atomic ... ok
+test t10_external_burn_cannot_withdraw ... ok
+test t07_double_redeem_fails ... ok
+test t08_non_holder_redeem_fails ... ok
+test t04_original_holder_cannot_redeem_after_transfer ... ok
+test t03_transfer_then_new_holder_redeems ... ok
+test t11_serial_limits_enforced ... ok
+test t14_metaplex_program_loads_in_harness ... ok
+test t12_mint_immutable_and_no_freeze ... ok
+test t15_metadata_created ... ok
+test t13_redeem_wrong_mint_fails ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+running 13 tests
+test b03_insufficient_funds_mint_fails_atomically ... ok
+test b08_redeem_returns_exact_collateral ... ok
+test b05_unauthorized_redeem_rejected ... ok
+test b04_double_redeem_rejected ... ok
+test b01_double_mint_same_serial_rejected ... ok
+test b02_distinct_serials_lock_exact_collateral ... ok
+test b06_serial_reuse_after_redeem_rejected ... ok
+test b07_prior_owner_cannot_redeem_after_transfer ... ok
+test b09_mint_locks_exactly_collateral_not_more ... ok
+test b12_no_hidden_admin_instruction ... ok
+test b11_failed_mint_tx_rolls_back ... ok
+test b10_wrong_program_id_rejected ... ok
+test b13_registry_single_init_and_nonzero_collateral ... ok
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s

@@ -1,0 +1,25 @@
+{
+  "name": "Wolf Coin #10",
+  "symbol": "WOLF",
+  "description": "Wolf Coin BETA — a collectible X1 NFT backed by exactly 5 XNT locked on-chain. Mint it. Own it. Transfer it. Redeem it. EXPERIMENTAL / NOT AUDITED.",
+  "image": "https://cdn.jsdelivr.net/gh/x1goose404-ops/wolfcoin-metadata@v1/metadata/coin.webp",
+  "external_url": "https://wolfcoin.x1/",
+  "attributes": [
+    {
+      "trait_type": "Denomination",
+      "value": "5 XNT"
+    },
+    {
+      "trait_type": "Serial",
+      "value": 10
+    },
+    {
+      "trait_type": "Backing",
+      "value": "On-chain vault"
+    },
+    {
+      "trait_type": "Edition",
+      "value": "BETA TEST EDITION"
+    }
+  ]
+}

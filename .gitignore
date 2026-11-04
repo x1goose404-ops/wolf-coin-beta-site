@@ -1,0 +1,25 @@
+# build output
+dist/
+node_modules
+node_modules/
+
+# NEVER commit keys or secrets
+*-keypair.json
+**/*-keypair.json
+id.json
+id*.json
+*.json.bak
+.env
+.env.*
+!/.env.example
+*.pem
+*.key
+*.secret
+
+# os / editor
+.DS_Store
+*.swp
+.vercel/
+
+# rust (contract-tests copy) — build artifacts
+contract-tests/target/
