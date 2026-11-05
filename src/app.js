@@ -147,12 +147,28 @@ function walletsRegistry() {
   if (walletsApi) return walletsApi;
   try { walletsApi = getWallets(); }
   catch (e) { console.warn("wallet-standard getWallets() failed", e); walletsApi = null; }
+  // Re-announce to wallets that registered BEFORE this app loaded (Wallet Standard handshake).
+  try {
+    window.dispatchEvent(new CustomEvent("wallet-standard:app-ready", { detail: (wallet) => { try { walletsApi && walletsApi.register && walletsApi.register(wallet); } catch {} } }));
+  } catch {}
+  // Pick up late registrations + keep the diagnostics panel live.
+  try { walletsApi && walletsApi.on && walletsApi.on("register", () => { try { render(); } catch {} }); } catch {}
   return walletsApi;
 }
 function standardWallets() {
+  const out = [];
   const reg = walletsRegistry();
-  if (!reg) return [];
-  try { return Array.from(reg.get() || []); } catch { return []; }
+  if (reg) { try { out.push(...Array.from(reg.get() || [])); } catch {} }
+  // Some wallets expose the registry on navigator.wallets instead.
+  try {
+    const nav = window.navigator && window.navigator.wallets;
+    if (Array.isArray(nav)) out.push(...nav);
+    else if (nav && Array.isArray(nav.get)) out.push(...nav.get());
+    else if (nav && Array.isArray(nav.wallets)) out.push(...nav.wallets);
+  } catch {}
+  // de-dupe by name+icon
+  const seen = new Set();
+  return out.filter((w) => { const k = (w && w.name) + "|" + ((w && w.icon) || ""); if (seen.has(k)) return false; seen.add(k); return true; });
 }
 const featuresOf = (w) => Object.keys(w?.features || {});
 const supportsConnect = (w) => !!w?.features?.[WS.connect]?.connect;
@@ -173,6 +189,8 @@ function pickChain(wallet, account) {
 function legacyGlobals() {
   const g = [];
   if (window.x1?.connect) g.push(["X1 Wallet", window.x1]);
+  if (window.x1Wallet?.connect) g.push(["X1 Wallet", window.x1Wallet]);
+  if (window.x1wallet?.connect) g.push(["X1 Wallet", window.x1wallet]);
   if (window.solana?.connect) g.push([window.solana.isX1 ? "X1 Wallet" : "Solana", window.solana]);
   if (window.phantom?.solana?.connect) g.push(["Phantom", window.phantom.solana]);
   if (window.solflare?.connect) g.push(["Solflare", window.solflare]);
