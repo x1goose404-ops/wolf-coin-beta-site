@@ -54,7 +54,7 @@ window.WOLF_BETA = {
   // live=false => every action is SIMULATED via RPC simulateTransaction only.
   // Nothing is signed-and-sent. Set to true only for an authorized live beta
   // (fresh user authorization + funds) — see docs/ENV-AND-DEPLOY.md.
-  live: false,
+  live: true,
 
   // ---- optional wallet-art hosting (the on-chain Metaplex uri points here; the
   // program's URI base is hardcoded, so wallet-side art depends on this repo/CDN) ----
