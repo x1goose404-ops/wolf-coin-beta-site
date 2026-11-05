@@ -230,7 +230,8 @@ function legacyFeatures(p) {
 function detectWallets() {
   const out = [];
   for (const w of standardWallets()) {
-    out.push({ kind: "standard", name: w.name || "wallet-standard", features: featuresOf(w), wallet: w, ok: supportsConnect(w) && supportsSign(w) });
+    // Do NOT filter out wallets lacking a sign feature here — that must be checked AFTER connect.
+    out.push({ kind: "standard", name: w.name || "wallet-standard", features: featuresOf(w), wallet: w, ok: supportsConnect(w) });
   }
   for (const [name, p] of legacyGlobals()) {
     out.push({ kind: "legacy", name: p.isX1 ? "X1 Wallet" : name, features: legacyFeatures(p), provider: p, ok: !!p.connect });
@@ -336,7 +337,7 @@ function makeLegacyProvider(name, p) {
 /** Choose a provider: Wallet Standard (connect + sign) first, then legacy globals. */
 function pickProvider() {
   const std = standardWallets();
-  const ready = std.filter((w) => supportsConnect(w) && supportsSign(w))
+  const ready = std.filter(supportsConnect)
     .sort((a, b) => (isSolanaChain(b) ? 1 : 0) - (isSolanaChain(a) ? 1 : 0));
   if (ready[0]) return makeStandardProvider(ready[0]);
   const connectable = std.filter(supportsConnect);
