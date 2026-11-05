@@ -1,7 +1,8 @@
 /* Wolf Coin BETA — unit tests for pure helpers (node --test). No chain, no browser. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { u32le, u64le, serialUsed, serialLabel, validateRecipient, collateralMatches, classifyNetwork } from "../src/beta-core.js";
+import { u32le, u64le, serialUsed, serialLabel, validateRecipient, collateralMatches, classifyNetwork, base58encode } from "../src/beta-core.js";
+import { PublicKey, Keypair } from "@solana/web3.js";
 
 test("serial labels are BETA-0001..BETA-0010", () => {
   assert.equal(serialLabel(1), "BETA-0001");
@@ -48,4 +49,16 @@ test("wrong-network classification", () => {
   const ok = classifyNetwork({ clusterKey: "mainnet", rpcReachable: true, programFound: true, programExecutable: true });
   assert.equal(ok.ok, true);
   assert.match(ok.notes.join(" "), /program present/);
+});
+
+test("base58encode matches PublicKey.toBase58 (wallet-standard signature bytes)", () => {
+  assert.equal(base58encode(new Uint8Array([])), "");
+  for (let i = 0; i < 25; i++) {
+    const kp = Keypair.generate();
+    assert.equal(base58encode(kp.publicKey.toBytes()), kp.publicKey.toBase58());
+  }
+  // leading zero bytes must map to leading '1's
+  const z = new Uint8Array(32); z[31] = 5;
+  assert.equal(base58encode(z), new PublicKey(z).toBase58());
+  assert.equal(base58encode(z), "1".repeat(31) + "6");
 });

@@ -6,6 +6,18 @@ export const u64le = (n) => { const b = new Uint8Array(8); new DataView(b.buffer
 export const concat = (...as) => { const n = as.reduce((s, a) => s + a.length, 0); const o = new Uint8Array(n); let p = 0; for (const a of as) { o.set(a, p); p += a.length; } return o; };
 export const hex = (u8) => Array.from(u8, (b) => b.toString(16).padStart(2, "0")).join("");
 
+/** Minimal base58 (Bitcoin alphabet) encoder — used to render wallet-standard signature bytes. */
+const B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+export function base58encode(bytes) {
+  const u8 = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes || []);
+  let n = 0n;
+  for (const b of u8) n = (n << 8n) | BigInt(b);
+  let out = "";
+  while (n > 0n) { out = B58_ALPHABET[Number(n % 58n)] + out; n /= 58n; }
+  for (const b of u8) { if (b === 0) out = "1" + out; else break; }
+  return out;
+}
+
 /** Registry `used` bitmap: bit `s` set == serial `s` already minted. */
 export const serialUsed = (usedBitmap, s) => (BigInt(usedBitmap) & (1n << BigInt(s))) !== 0n;
 

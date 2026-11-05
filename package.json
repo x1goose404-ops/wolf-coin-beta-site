@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "@solana/spl-token": "0.4.15",
-    "@solana/web3.js": "1.99.0"
+    "@solana/web3.js": "1.99.0",
+    "@wallet-standard/app": "^1.1.1"
   },
   "devDependencies": {
     "esbuild": "0.28.2"

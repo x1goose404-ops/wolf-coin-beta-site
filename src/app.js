@@ -16,7 +16,10 @@ import {
   getAssociatedTokenAddressSync, createAssociatedTokenAccountIdempotentInstruction,
   createTransferInstruction, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
 } from "@solana/spl-token";
-import { u32le, u64le, concat, serialUsed, validateRecipient, classifyNetwork, collateralMatches } from "./beta-core.js";
+import { u32le, u64le, concat, serialUsed, validateRecipient, classifyNetwork, collateralMatches, base58encode } from "./beta-core.js";
+// Wallet Standard discovery: X1 Wallet registers via the Wallet Standard and is NOT
+// exposed as window.x1 / window.solana. getWallets() returns the registered wallets.
+import { getWallets } from "@wallet-standard/app";
 
 const CFG = window.WOLF_BETA;
 const $ = (s) => document.querySelector(s);
@@ -123,48 +126,207 @@ const explorerTx = (sig) => `${cfgCluster().explorer}/tx/${sig}`;
 const explorerAddr = (a) => `${cfgCluster().explorer}/address/${a}`;
 const short = (s, n = 4) => (typeof s === "string" ? `${s.slice(0, n)}…${s.slice(-n)}` : "");
 
-/* ------------------------------------------------------------------ wallet */
-function detectProvider() {
-  if (window.x1?.connect) return window.x1;
-  if (window.solana?.connect) return window.solana;
-  if (window.phantom?.solana?.connect) return window.phantom.solana;
-  if (window.solflare?.connect) return window.solflare;
-  if (window.backpack?.connect) return window.backpack;
-  return null;
+/* ------------------------------------------------------------------ wallet
+ * Wallet Standard-FIRST. X1 Wallet (and other modern wallets) register through the
+ * Wallet Standard and are discovered via @wallet-standard/app getWallets(); they do
+ * NOT expose window.x1 / window.solana. We therefore prefer a registered wallet that
+ * supports `standard:connect` + `solana:signTransaction` (or `solana:signAndSendTransaction`),
+ * and keep a window.x1 / window.solana / phantom / solflare / backpack fallback.
+ */
+const WS = {
+  connect: "standard:connect",
+  disconnect: "standard:disconnect",
+  events: "standard:events",
+  signTransaction: "solana:signTransaction",
+  signMessage: "solana:signMessage",
+  signAndSendTransaction: "solana:signAndSendTransaction",
+};
+
+let walletsApi = null;
+function walletsRegistry() {
+  if (walletsApi) return walletsApi;
+  try { walletsApi = getWallets(); }
+  catch (e) { console.warn("wallet-standard getWallets() failed", e); walletsApi = null; }
+  return walletsApi;
 }
-function providerName() {
-  const p = app.provider;
-  if (!p) return "wallet";
-  if (p.isX1) return "X1 Wallet";
-  if (p.isPhantom) return "Phantom";
-  if (p.isSolflare) return "Solflare";
-  if (p.isBackpack) return "Backpack";
-  return p.name || "wallet";
+function standardWallets() {
+  const reg = walletsRegistry();
+  if (!reg) return [];
+  try { return Array.from(reg.get() || []); } catch { return []; }
+}
+const featuresOf = (w) => Object.keys(w?.features || {});
+const supportsConnect = (w) => !!w?.features?.[WS.connect]?.connect;
+const supportsSign = (w) => !!(w?.features?.[WS.signTransaction]?.signTransaction || w?.features?.[WS.signAndSendTransaction]?.signAndSendTransaction);
+const isSolanaChain = (w) => (w?.chains || []).some((c) => c.startsWith("solana:") || c.startsWith("x1:"));
+/** Wallet-Standard chain id for the active cluster (X1 uses solana:mainnet / solana:testnet). */
+const desiredChain = () => (app.clusterKey === "testnet" ? "solana:testnet" : "solana:mainnet");
+function pickChain(wallet, account) {
+  const want = desiredChain();
+  const acctChains = account?.chains || [];
+  const walChains = wallet?.chains || [];
+  if (acctChains.includes(want)) return want;
+  if (walChains.includes(want)) return want;
+  return acctChains[0] || walChains[0] || want;
 }
 
+/* ---- legacy (non-standard) window globals, kept as fallback ---- */
+function legacyGlobals() {
+  const g = [];
+  if (window.x1?.connect) g.push(["X1 Wallet", window.x1]);
+  if (window.solana?.connect) g.push([window.solana.isX1 ? "X1 Wallet" : "Solana", window.solana]);
+  if (window.phantom?.solana?.connect) g.push(["Phantom", window.phantom.solana]);
+  if (window.solflare?.connect) g.push(["Solflare", window.solflare]);
+  if (window.backpack?.connect) g.push(["Backpack", window.backpack]);
+  return g;
+}
+function legacyFeatures(p) {
+  const f = [];
+  if (p.connect) f.push("connect");
+  if (p.disconnect) f.push("disconnect");
+  if (p.signTransaction) f.push("signTransaction");
+  if (p.signAndSendTransaction) f.push("signAndSendTransaction");
+  if (p.signMessage) f.push("signMessage");
+  if (p.on) f.push("events");
+  return f;
+}
+
+/** Full detection report: [{ kind, name, features, ok }]. */
+function detectWallets() {
+  const out = [];
+  for (const w of standardWallets()) {
+    out.push({ kind: "standard", name: w.name || "wallet-standard", features: featuresOf(w), wallet: w, ok: supportsConnect(w) && supportsSign(w) });
+  }
+  for (const [name, p] of legacyGlobals()) {
+    out.push({ kind: "legacy", name: p.isX1 ? "X1 Wallet" : name, features: legacyFeatures(p), provider: p, ok: !!p.connect });
+  }
+  return out;
+}
+function detectSummary() {
+  const list = detectWallets();
+  if (!list.length) return "none detected";
+  return list.map((d) => `${d.name} (${d.kind}: ${d.features.join(",") || "no features"})`).join(" · ");
+}
+
+/* ---- normalized providers (uniform connect / signTransaction / signAndSend) ---- */
+function makeStandardProvider(w) {
+  return {
+    kind: "standard",
+    name: w.name || "Wallet Standard",
+    wallet: w,
+    account: null,
+    features: featuresOf(w),
+    hasSignTransaction: !!w.features?.[WS.signTransaction]?.signTransaction,
+    hasSignAndSend: !!w.features?.[WS.signAndSendTransaction]?.signAndSendTransaction,
+    async connect() {
+      const accounts = (await w.features[WS.connect].connect())?.accounts || [];
+      const acct = accounts[0];
+      if (!acct) throw new Error("standard:connect returned no accounts");
+      this.account = acct;
+      return new PublicKey(acct.publicKey);
+    },
+    async disconnect() {
+      try { await w.features?.[WS.disconnect]?.disconnect?.(); } catch { /* ignore */ }
+    },
+    async signTransaction(tx) {
+      const feat = w.features?.[WS.signTransaction];
+      if (!feat?.signTransaction) throw new Error("wallet has no solana:signTransaction feature");
+      const transaction = new Uint8Array(tx.serialize({ requireAllSignatures: false, verifySignatures: false }));
+      const [out] = await feat.signTransaction({ account: this.account, chain: pickChain(w, this.account), transaction });
+      if (!out?.signedTransaction) throw new Error("wallet returned no signed transaction");
+      return out.signedTransaction; // Uint8Array -> sendRawTransaction
+    },
+    async signAndSendTransaction(tx) {
+      const feat = w.features?.[WS.signAndSendTransaction];
+      if (!feat?.signAndSendTransaction) throw new Error("wallet has no solana:signAndSendTransaction feature");
+      const transaction = new Uint8Array(tx.serialize({ requireAllSignatures: false, verifySignatures: false }));
+      const [out] = await feat.signAndSendTransaction({ account: this.account, chain: pickChain(w, this.account), transaction });
+      const sig = out?.signature;
+      if (!sig) throw new Error("wallet returned no signature");
+      return typeof sig === "string" ? sig : base58encode(sig);
+    },
+  };
+}
+function makeLegacyProvider(name, p) {
+  return {
+    kind: "legacy",
+    name: p.isX1 ? "X1 Wallet" : (p.name || name),
+    provider: p,
+    features: legacyFeatures(p),
+    hasSignTransaction: !!p.signTransaction,
+    hasSignAndSend: !!p.signAndSendTransaction,
+    async connect() {
+      const res = await p.connect();
+      const pk = res?.publicKey || p.publicKey;
+      if (!pk) throw new Error("wallet returned no public key");
+      return new PublicKey(pk);
+    },
+    async disconnect() { try { await p.disconnect?.(); } catch { /* ignore */ } },
+    async signTransaction(tx) {
+      const signed = await p.signTransaction(tx);
+      return signed.serialize({ requireAllSignatures: false, verifySignatures: false });
+    },
+    async signAndSendTransaction(tx) {
+      const r = await p.signAndSendTransaction(tx);
+      return typeof r === "string" ? r : r.signature;
+    },
+  };
+}
+/** Choose a provider: Wallet Standard (connect + sign) first, then legacy globals. */
+function pickProvider() {
+  const std = standardWallets();
+  const ready = std.filter((w) => supportsConnect(w) && supportsSign(w))
+    .sort((a, b) => (isSolanaChain(b) ? 1 : 0) - (isSolanaChain(a) ? 1 : 0));
+  if (ready[0]) return makeStandardProvider(ready[0]);
+  const connectable = std.filter(supportsConnect);
+  if (connectable[0]) return makeStandardProvider(connectable[0]);
+  for (const [name, p] of legacyGlobals()) return makeLegacyProvider(name, p);
+  return null;
+}
+function providerName() { return app.provider ? app.provider.name : "wallet"; }
+
 async function connectWallet() {
-  const p = detectProvider();
-  if (!p) {
-    toast("No X1-compatible wallet found. Install X1 Wallet (or a wallet-standard provider) and reload.", "warn");
+  const detected = detectSummary();
+  log(`Wallet scan — ${detected}`);
+  const prov = pickProvider();
+  if (!prov) {
+    toast(`No X1-compatible wallet found. Detected: ${detected}. Install X1 Wallet and reload.`, "warn");
+    updateWalletDiag();
     return;
   }
-  app.provider = p;
+  app.provider = prov;
+  updateWalletDiag();
   try {
-    const res = await p.connect();
-    const pk = res?.publicKey || p.publicKey;
-    if (!pk) throw new Error("wallet returned no public key");
-    app.wallet = new PublicKey(pk);
+    const pk = await prov.connect();
+    app.wallet = pk;
     render();
-    toast(`Connected ${providerName()}: ${short(app.wallet.toBase58(), 6)}`, "ok");
+    const feats = prov.features.join(", ") || "no features";
+    log(`Connected · ${prov.kind} · ${prov.name} · account ${short(app.wallet.toBase58(), 6)} · features [${feats}]`);
+    toast(`Connected ${prov.name} (${prov.kind}) ${short(app.wallet.toBase58(), 6)} · features: ${feats}`, "ok");
     await verifyNetwork();
     await refreshChainState();
   } catch (e) {
-    toast(`Connect failed: ${e.message || e}`, "err");
+    toast(`Connect failed (${prov.name}): ${e.message || e}`, "err");
+    log(`Connect FAILED (${prov.name}): ${e.message || e}`);
+    app.provider = null; app.wallet = null;
+    updateWalletDiag();
   }
 }
 async function disconnectWallet() {
   try { await app.provider?.disconnect?.(); } catch { /* ignore */ }
-  app.provider = null; app.wallet = null; app.coins = []; render();
+  app.provider = null; app.wallet = null; app.coins = []; render(); updateWalletDiag();
+}
+
+/** Visible diagnostic: detected wallet names + features (so failures are obvious). */
+function updateWalletDiag() {
+  const el = document.getElementById("walletDiag");
+  if (!el) return;
+  const list = detectWallets();
+  const rows = list.length
+    ? list.map((d) => `${d.ok ? "✔" : "•"} <b>${d.name}</b> <span class="muted">[${d.kind}] ${d.features.join(", ") || "no features"}</span>`).join("<br>")
+    : `<span class="muted">no wallet detected — Wallet Standard wallets (X1) or window.x1 / phantom / solflare / backpack</span>`;
+  el.hidden = false;
+  el.className = "netcheck " + (app.wallet ? "ok" : (list.some((d) => d.ok) ? "" : "bad"));
+  el.innerHTML = `<div><b>Wallet detection</b>${app.wallet ? ` — connected: ${providerName()}` : " (Wallet Standard-first)"}</div>${rows}`;
 }
 
 /** Network check: right cluster + program actually present. */
@@ -244,13 +406,15 @@ async function withTx(ixs, signers, actionLabel) {
 
   // ---- LIVE MODE: sign + send (only when cfg.live === true) ----
   try {
+    const prov = app.provider;
     let sig;
-    if (app.provider.signTransaction) {
-      const signed = await app.provider.signTransaction(tx);
-      sig = await conn.sendRawTransaction(signed.serialize(), { skipPreflight: false, maxRetries: 3 });
-    } else if (app.provider.signAndSendTransaction) {
-      const r = await app.provider.signAndSendTransaction(tx);
-      sig = typeof r === "string" ? r : r.signature;
+    if (prov?.signTransaction) {
+      // Wallet Standard: solana:signTransaction -> signed bytes; we send + confirm ourselves.
+      const raw = await prov.signTransaction(tx);
+      sig = await conn.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3 });
+    } else if (prov?.signAndSendTransaction) {
+      // Fallback: solana:signAndSendTransaction (Wallet Standard or legacy).
+      sig = await prov.signAndSendTransaction(tx);
     } else {
       throw new Error("wallet cannot sign transactions");
     }
@@ -344,6 +508,7 @@ function render() {
   }).join("");
 
   $$("#grid [data-open]").forEach((b) => b.addEventListener("click", () => openCoin(Number(b.dataset.open))));
+  updateWalletDiag();
   renderLogFromArray();
 }
 
@@ -414,6 +579,11 @@ function toast(msg, kind = "ok") {
 /* ------------------------------------------------------------------ wiring */
 function init() {
   app.connection = new Connection(cfgCluster().rpc, "confirmed");
+  // Initialise the Wallet Standard registry early (before the first click) and refresh
+  // the diagnostic whenever a wallet registers/unregisters.
+  const reg = walletsRegistry();
+  if (reg?.on) { try { reg.on("register", () => updateWalletDiag()); reg.on("unregister", () => updateWalletDiag()); } catch { /* ignore */ } }
+  updateWalletDiag();
   wireConfirm();
   $("#connectBtn").addEventListener("click", () => (app.wallet ? disconnectWallet() : connectWallet()));
   $("#startBtn").addEventListener("click", () => $("#collection").scrollIntoView({ behavior: "smooth" }));
