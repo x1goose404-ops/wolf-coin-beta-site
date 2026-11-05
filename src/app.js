@@ -174,10 +174,12 @@ function walletsRegistry() {
   return walletsApi;
 }
 function standardWallets() {
-  const out = [];
+  const pack = [];
   const reg = walletsRegistry();
-  if (reg) { try { out.push(...Array.from(reg.get() || [])); } catch {} }
-  // Some wallets expose the registry on navigator.wallets instead.
+  if (reg) { try { pack.push(...Array.from(reg.get() || [])); } catch {} }
+  const manual = manualRegistry().get();
+  const out = [...manual, ...pack];
+  // Some wallets also expose the registry on navigator.wallets.
   try {
     const nav = window.navigator && window.navigator.wallets;
     if (Array.isArray(nav)) out.push(...nav);
@@ -187,6 +189,23 @@ function standardWallets() {
   // de-dupe by name+icon
   const seen = new Set();
   return out.filter((w) => { const k = (w && w.name) + "|" + ((w && w.icon) || ""); if (seen.has(k)) return false; seen.add(k); return true; });
+}
+
+/* Spec-compliant Wallet Standard registry implemented directly (so we do not depend on the
+ * bundled @wallet-standard/app behaving). Wallets dispatch 'wallet-standard:register-wallet'
+ * with the wallet as event.detail; apps announce readiness with 'wallet-standard:app-ready'
+ * whose detail.register(wallet) lets wallets that loaded first (re)register. */
+let manualReg = null;
+function manualRegistry() {
+  if (manualReg) return manualReg;
+  const list = []; const subs = [];
+  const add = (w) => { if (!w || list.includes(w)) return; list.push(w); for (const cb of subs) { try { cb(w); } catch {} } };
+  const register = (...ws) => ws.forEach(add);
+  try { window.addEventListener("wallet-standard:register-wallet", (e) => { const d = e && e.detail; register(...(Array.isArray(d) ? d : [d])); }); } catch {}
+  try { window.addEventListener("wallet-standard:discover-wallet", (e) => { const d = e && e.detail; register(...(Array.isArray(d) ? d : [d])); }); } catch {}
+  try { window.dispatchEvent(new CustomEvent("wallet-standard:app-ready", { detail: { register } })); } catch {}
+  manualReg = { get: () => list.slice(), on: (ev, cb) => { if (ev === "register") subs.push(cb); return () => {}; }, register };
+  return manualReg;
 }
 const featuresOf = (w) => Object.keys(w?.features || {});
 const supportsConnect = (w) => !!w?.features?.[WS.connect]?.connect;
