@@ -147,10 +147,8 @@ function walletsRegistry() {
   if (walletsApi) return walletsApi;
   try { walletsApi = getWallets(); }
   catch (e) { console.warn("wallet-standard getWallets() failed", e); walletsApi = null; }
-  // Re-announce to wallets that registered BEFORE this app loaded (Wallet Standard handshake).
-  try {
-    window.dispatchEvent(new CustomEvent("wallet-standard:app-ready", { detail: (wallet) => { try { walletsApi && walletsApi.register && walletsApi.register(wallet); } catch {} } }));
-  } catch {}
+  // @wallet-standard/app getWallets() performs the app-ready handshake internally;
+  // do NOT dispatch it ourselves (a wrong detail signature can confuse wallets).
   // Pick up late registrations + keep the diagnostics panel live.
   try { walletsApi && walletsApi.on && walletsApi.on("register", () => { try { render(); } catch {} }); } catch {}
   return walletsApi;
