@@ -125,6 +125,26 @@ const cfgCluster = () => CFG.clusters[app.clusterKey];
 const explorerTx = (sig) => `${cfgCluster().explorer}/tx/${sig}`;
 const explorerAddr = (a) => `${cfgCluster().explorer}/address/${a}`;
 const short = (s, n = 4) => (typeof s === "string" ? `${s.slice(0, n)}…${s.slice(-n)}` : "");
+/** Normalise any wallet public-key shape (string | Uint8Array | PublicKey-like) to base58. */
+function toBase58(pk) {
+  if (!pk) return null;
+  if (typeof pk === "string") return pk;
+  if (pk instanceof Uint8Array) return base58encode(pk);
+  if (Array.isArray(pk)) return base58encode(Uint8Array.from(pk));
+  if (typeof pk.toBase58 === "function") return pk.toBase58();
+  return String(pk);
+}
+/** Raw JSON-RPC getHealth (Connection.getHealth does not exist in @solana/web3.js 1.99). */
+async function rpcHealth(rpc) {
+  try {
+    const r = await fetch(rpc, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
+    });
+    return r.ok;
+  } catch { return false; }
+}
 
 /* ------------------------------------------------------------------ wallet
  * Wallet Standard-FIRST. X1 Wallet (and other modern wallets) register through the
@@ -224,6 +244,23 @@ function detectSummary() {
 }
 
 /* ---- normalized providers (uniform connect / signTransaction / signAndSend) ---- */
+/** Keep the visible account in sync when a Wallet Standard wallet fires standard:events. */
+function subscribeStandardEvents(prov, w) {
+  try {
+    const ev = w.features?.[WS.events];
+    if (!ev?.on || prov._unsub) return;
+    prov._unsub = ev.on("change", (props) => {
+      const accounts = props?.accounts;
+      if (Array.isArray(accounts) && accounts.length) {
+        prov.account = accounts[0];
+        app.wallet = new PublicKey(accounts[0].publicKey);
+        render();
+      } else if (Array.isArray(accounts)) {
+        app.provider = null; app.wallet = null; app.coins = []; render();
+      }
+    });
+  } catch { /* ignore */ }
+}
 function makeStandardProvider(w) {
   return {
     kind: "standard",
@@ -238,7 +275,10 @@ function makeStandardProvider(w) {
       const acct = accounts[0];
       if (!acct) throw new Error("standard:connect returned no accounts");
       this.account = acct;
-      return new PublicKey(acct.publicKey);
+      subscribeStandardEvents(this, w);
+      const b58 = toBase58(acct.publicKey);
+      if (!b58) throw new Error("wallet returned no public key");
+      return new PublicKey(b58);
     },
     async disconnect() {
       try { await w.features?.[WS.disconnect]?.disconnect?.(); } catch { /* ignore */ }
@@ -248,8 +288,11 @@ function makeStandardProvider(w) {
       if (!feat?.signTransaction) throw new Error("wallet has no solana:signTransaction feature");
       const transaction = new Uint8Array(tx.serialize({ requireAllSignatures: false, verifySignatures: false }));
       const [out] = await feat.signTransaction({ account: this.account, chain: pickChain(w, this.account), transaction });
-      if (!out?.signedTransaction) throw new Error("wallet returned no signed transaction");
-      return out.signedTransaction; // Uint8Array -> sendRawTransaction
+      const signed = out?.signedTransaction ?? out;
+      if (!signed) throw new Error("wallet returned no signed transaction");
+      if (signed instanceof Uint8Array) return signed;
+      if (typeof signed.serialize === "function") return signed.serialize({ requireAllSignatures: false, verifySignatures: false });
+      throw new Error("wallet returned an unsupported signed-transaction shape");
     },
     async signAndSendTransaction(tx) {
       const feat = w.features?.[WS.signAndSendTransaction];
@@ -272,14 +315,17 @@ function makeLegacyProvider(name, p) {
     hasSignAndSend: !!p.signAndSendTransaction,
     async connect() {
       const res = await p.connect();
-      const pk = res?.publicKey || p.publicKey;
-      if (!pk) throw new Error("wallet returned no public key");
-      return new PublicKey(pk);
+      const b58 = toBase58(res?.publicKey || p.publicKey);
+      if (!b58) throw new Error("wallet returned no public key");
+      return new PublicKey(b58);
     },
     async disconnect() { try { await p.disconnect?.(); } catch { /* ignore */ } },
     async signTransaction(tx) {
       const signed = await p.signTransaction(tx);
-      return signed.serialize({ requireAllSignatures: false, verifySignatures: false });
+      if (signed?.serialize) return signed.serialize({ requireAllSignatures: false, verifySignatures: false });
+      if (signed instanceof Uint8Array) return signed;
+      if (signed?.serializedTransaction instanceof Uint8Array) return signed.serializedTransaction;
+      throw new Error("wallet returned an unsupported signed-transaction shape");
     },
     async signAndSendTransaction(tx) {
       const r = await p.signAndSendTransaction(tx);
@@ -298,14 +344,23 @@ function pickProvider() {
   for (const [name, p] of legacyGlobals()) return makeLegacyProvider(name, p);
   return null;
 }
+/** Retry discovery briefly so a late-registering Wallet Standard wallet (X1) is still found. */
+async function pickProviderWithRetry(attempts = 8, delayMs = 350) {
+  for (let i = 0; i < attempts; i++) {
+    const p = pickProvider();
+    if (p) return p;
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return null;
+}
 function providerName() { return app.provider ? app.provider.name : "wallet"; }
 
 async function connectWallet() {
   const detected = detectSummary();
   log(`Wallet scan — ${detected}`);
-  const prov = pickProvider();
+  const prov = await pickProviderWithRetry();
   if (!prov) {
-    toast(`No X1-compatible wallet found. Detected: ${detected}. Install X1 Wallet and reload.`, "warn");
+    toast(`No X1-compatible wallet found. Detected: ${detected}. Install X1 Wallet, then press “Re-scan wallets”.`, "warn");
     updateWalletDiag();
     return;
   }
@@ -339,18 +394,35 @@ function updateWalletDiag() {
   const list = detectWallets();
   const rows = list.length
     ? list.map((d) => `${d.ok ? "✔" : "•"} <b>${d.name}</b> <span class="muted">[${d.kind}] ${d.features.join(", ") || "no features"}</span>`).join("<br>")
-    : `<span class="muted">no wallet detected — Wallet Standard wallets (X1) or window.x1 / phantom / solflare / backpack</span>`;
+    : `<span class="muted">no wallet detected — Wallet Standard wallets (X1) or window.x1 / window.solana / phantom / solflare / backpack</span>`;
   el.hidden = false;
   el.className = "netcheck " + (app.wallet ? "ok" : (list.some((d) => d.ok) ? "" : "bad"));
-  el.innerHTML = `<div><b>Wallet detection</b>${app.wallet ? ` — connected: ${providerName()}` : " (Wallet Standard-first)"}</div>${rows}`;
+  el.innerHTML =
+    `<div class="diaghead"><b>Wallet detection</b>` +
+    (app.wallet ? ` — connected: ${providerName()}` : " (Wallet Standard-first)") +
+    ` <button class="btn small" id="rescanBtn" type="button">Re-scan wallets</button></div>${rows}`;
+  const btn = document.getElementById("rescanBtn");
+  if (btn) btn.addEventListener("click", rescanWallets);
+}
+/** Force a fresh Wallet Standard scan (clears the cached registry handle + re-renders). */
+function rescanWallets() {
+  try { walletsApi = null; } catch { /* ignore */ }
+  walletsRegistry();
+  updateWalletDiag();
+  toast("Re-scanned for wallets.", "ok");
 }
 
 /** Network check: right cluster + program actually present. */
 async function verifyNetwork() {
   const c = cfgCluster();
   let rpcReachable = true;
-  try { await app.connection.getHealth(); } catch { rpcReachable = false; }
+  // NOTE: @solana/web3.js 1.99.0 has NO Connection.getHealth(); use getVersion
+  // (supported) and fall back to a raw JSON-RPC getHealth probe, then the
+  // presence of the program account itself as the strongest signal.
+  try { await app.connection.getVersion(); }
+  catch { rpcReachable = await rpcHealth(c.rpc); }
   const prog = await app.connection.getAccountInfo(PROGRAM_ID).catch(() => null);
+  if (prog) rpcReachable = true;
   const net = classifyNetwork({
     clusterKey: c.label, rpcReachable, programFound: !!prog, programExecutable: prog ? prog.executable : false,
   });
@@ -365,27 +437,39 @@ async function refreshChainState() {
   app.busy = true; render();
   try {
     app.connection = app.connection || new Connection(cfgCluster().rpc, "confirmed");
-    const regInfo = await app.connection.getAccountInfo(registryPda(), "confirmed");
+    const serials = Array.from({ length: CFG.maxSupply }, (_, i) => CFG.serialFirstName + i);
+    // Batched reads (1 request for the registry + 1 for all claims + 1 for all
+    // vaults + 1 for owned ATAs) instead of ~20 sequential round-trips.
+    const [regInfo, claimInfos] = await Promise.all([
+      app.connection.getAccountInfo(registryPda(), "confirmed"),
+      app.connection.getMultipleAccountsInfo(serials.map((s) => claimPda(s)), "confirmed"),
+    ]);
     app.registry = regInfo ? decodeRegistry(Uint8Array.from(regInfo.data)) : null;
 
-    const coins = [];
+    const vaultInfos = await app.connection.getMultipleAccountsInfo(serials.map((s) => vaultPda(s)), "confirmed");
     const owner = app.wallet || null;
-    for (let s = CFG.serialFirstName; s < CFG.serialFirstName + CFG.maxSupply; s++) {
-      const claimInfo = await app.connection.getAccountInfo(claimPda(s), "confirmed");
-      let coin = { serial: s, label: CFG.serialLabel(s), used: app.registry ? serialUsed(app.registry.used, s) : null, claim: null, vaultLamports: 0, owned: false, mint: null };
-      if (claimInfo) {
-        coin.claim = decodeClaim(Uint8Array.from(claimInfo.data));
+    const heldMints = [];
+    claimInfos.forEach((ci) => { if (ci) heldMints.push(decodeClaim(Uint8Array.from(ci.data)).mint); });
+    let ataInfos = [];
+    if (owner && heldMints.length) ataInfos = await app.connection.getMultipleAccountsInfo(heldMints.map((m) => ata(owner, m)), "confirmed");
+    const ataByMint = new Map();
+    heldMints.forEach((m, i) => ataByMint.set(m.toBase58(), ataInfos[i]));
+
+    app.coins = serials.map((s, i) => {
+      const coin = { serial: s, label: CFG.serialLabel(s), used: app.registry ? serialUsed(app.registry.used, s) : null, claim: null, vaultLamports: 0, owned: false, mint: null };
+      const ci = claimInfos[i];
+      if (ci) {
+        coin.claim = decodeClaim(Uint8Array.from(ci.data));
         coin.mint = coin.claim.mint;
-        const v = await app.connection.getAccountInfo(vaultPda(s), "confirmed");
-        coin.vaultLamports = v ? v.lamports : 0;
-        if (owner && coin.mint) {
-          const ta = await app.connection.getAccountInfo(ata(owner, coin.mint), "confirmed");
-          if (ta) { const d = decodeTokenAccount(Uint8Array.from(ta.data)); coin.owned = d.owner.equals(owner) && d.amount === 1; }
+        const vi = vaultInfos[i];
+        coin.vaultLamports = vi ? vi.lamports : 0;
+        if (owner) {
+          const ai = ataByMint.get(coin.mint.toBase58());
+          if (ai) { const d = decodeTokenAccount(Uint8Array.from(ai.data)); coin.owned = d.owner.equals(owner) && d.amount === 1; }
         }
       }
-      coins.push(coin);
-    }
-    app.coins = coins;
+      return coin;
+    });
   } catch (e) {
     toast(`State read failed: ${e.message || e}`, "err");
   } finally {
@@ -407,7 +491,10 @@ async function withTx(ixs, signers, actionLabel) {
   // ---- PREVIEW MODE: simulate only (never sends) ----
   if (!CFG.live) {
     try {
-      const sim = await conn.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true });
+      // @solana/web3.js 1.99.0 only accepts a signers array (not an options object)
+      // as the 2nd arg for a legacy Transaction — passing options throws
+      // "Invalid arguments". Call with no options; sigVerify defaults to false.
+      const sim = await conn.simulateTransaction(tx);
       const err = sim.value.err;
       const logs = (sim.value.logs || []).slice(-6).join("\n");
       if (err) throw new Error(`simulation failed: ${JSON.stringify(err)}\n${logs}`);
@@ -448,10 +535,14 @@ async function withTx(ixs, signers, actionLabel) {
 async function doMint(serial) {
   const c = app.coins.find((x) => x.serial === serial);
   if (c?.used) { toast(`Serial ${c.label} is already minted (permanently retired once used).`, "warn"); return; }
-  const mintKp = Keypair.generate();
-  const ixs = [ixMint(app.wallet, serial, mintKp.publicKey)];
-  log(`MINT ${CFG.serialLabel(serial)} → locks ${CFG.collateralXnt} XNT, mints 1-of-1 NFT`);
-  await withTx(ixs, [mintKp], `Mint ${CFG.serialLabel(serial)}`);
+  try {
+    const mintKp = Keypair.generate();
+    const ixs = [ixMint(app.wallet, serial, mintKp.publicKey)];
+    log(`MINT ${CFG.serialLabel(serial)} → locks ${CFG.collateralXnt} XNT, mints 1-of-1 NFT`);
+    await withTx(ixs, [mintKp], `Mint ${CFG.serialLabel(serial)}`);
+  } catch (e) {
+    toast(`Mint failed: ${e.message || e}`, "err"); log(`Mint FAILED: ${e.message || e}`);
+  }
 }
 async function doTransfer(serial, recipientStr) {
   const c = app.coins.find((x) => x.serial === serial);
@@ -459,9 +550,13 @@ async function doTransfer(serial, recipientStr) {
   if (!v.ok) { toast(v.error, "warn"); return; }
   const to = v.pubkey;
   if (!c?.owned) { toast("You do not currently hold this coin (ownership check failed on-chain).", "warn"); return; }
-  const ixs = ixTransferIxs(app.wallet, to, c.mint);
-  log(`TRANSFER ${c.label} → ${short(to.toBase58(), 6)} (ownership + redemption right move together)`);
-  await withTx(ixs, [], `Transfer ${c.label}`);
+  try {
+    const ixs = ixTransferIxs(app.wallet, to, c.mint);
+    log(`TRANSFER ${c.label} → ${short(to.toBase58(), 6)} (ownership + redemption right move together)`);
+    await withTx(ixs, [], `Transfer ${c.label}`);
+  } catch (e) {
+    toast(`Transfer failed: ${e.message || e}`, "err"); log(`Transfer FAILED: ${e.message || e}`);
+  }
 }
 async function doRedeem(serial) {
   const c = app.coins.find((x) => x.serial === serial);
@@ -470,9 +565,13 @@ async function doRedeem(serial) {
     toast(`Collateral check failed: vault holds ${c.vaultLamports} lamports, expected ${app.registry?.collateralLamports ?? CFG.collateralLamports}.`, "warn");
     return;
   }
-  const ixs = [ixRedeem(app.wallet, serial, c.mint)];
-  log(`REDEEM ${c.label} → burns the NFT and RETURNS exactly ${CFG.collateralXnt} XNT (serial permanently retired)`);
-  await withTx(ixs, [], `Redeem ${c.label}`);
+  try {
+    const ixs = [ixRedeem(app.wallet, serial, c.mint)];
+    log(`REDEEM ${c.label} → burns the NFT and RETURNS exactly ${CFG.collateralXnt} XNT (serial permanently retired)`);
+    await withTx(ixs, [], `Redeem ${c.label}`);
+  } catch (e) {
+    toast(`Redeem failed: ${e.message || e}`, "err"); log(`Redeem FAILED: ${e.message || e}`);
+  }
 }
 
 /* ------------------------------------------------------------------ render */
@@ -494,7 +593,8 @@ function render() {
   $("#collateral").textContent = reg ? `${(reg.collateralLamports / LAMPORTS_PER_SOL)} XNT` : `${CFG.collateralXnt} XNT`;
   $("#walletPill").textContent = app.wallet ? `${providerName()} · ${short(app.wallet.toBase58(), 4)}` : "not connected";
   $("#connectBtn").textContent = app.wallet ? "Disconnect" : "Connect X1 wallet";
-  $("#liveBanner").hidden = CFG.live;
+  $("#liveBanner").hidden = !CFG.live;
+  const pnote = $("#previewNote"); if (pnote) pnote.hidden = CFG.live;
   $("#refreshBtn").disabled = app.busy;
 
   const netEl = $("#netcheck");
@@ -618,6 +718,9 @@ function init() {
   $("#artHash").textContent = CFG.artwork.blake3;
   log(`Wolf Coin BETA loaded · program ${short(CFG.programId, 6)} · ${CFG.maxSupply} serials · ${CFG.collateralXnt} XNT backing · ${cfgCluster().label}.`);
   render();
+  // Read-only diagnostics surface (no keys, no signing) so wallet/network
+  // problems can be inspected from the console. Actions still need the wallet.
+  try { window.WOLF_DEBUG = { app, CFG, verifyNetwork, refreshChainState, detectWallets, connectWallet, disconnectWallet, rpcHealth }; } catch { /* ignore */ }
   // auto-load public state (no wallet needed for supply)
   refreshChainState();
 }

@@ -31,6 +31,9 @@ export function validateRecipient(recipientStr, selfStr) {
   try { pk = new PublicKey(s); } catch { return { ok: false, error: "Not a valid X1 address." }; }
   if (pk.toBase58() !== s) return { ok: false, error: "Address is not in canonical base58 form." };
   if (selfStr && pk.toBase58() === selfStr) return { ok: false, error: "Recipient is your own wallet." };
+  // A recipient that is not on the ed25519 curve (e.g. a program/PDA address) can never
+  // sign, so the coin — and its 5 XNT redemption right — would be permanently stranded.
+  if (!PublicKey.isOnCurve(pk.toBytes())) return { ok: false, error: "Recipient is not a wallet address (off-curve / program address)." };
   return { ok: true, pubkey: pk };
 }
 

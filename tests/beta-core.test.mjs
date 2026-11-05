@@ -30,9 +30,11 @@ test("recipient validation rejects junk, non-canonical and self", () => {
   assert.equal(validateRecipient("not-an-address", SELF).ok, false);
   assert.equal(validateRecipient(SELF, SELF).ok, false);
   assert.match(validateRecipient(SELF, SELF).error, /own wallet/);
-  const good = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+  const good = Keypair.generate().publicKey.toBase58();
   assert.equal(validateRecipient(good, SELF).ok, true);
   assert.equal(validateRecipient(good, SELF).pubkey.toBase58(), good);
+  // off-curve (program/PDA) recipients are rejected — they can never sign to redeem
+  assert.equal(validateRecipient("HxLucJYBVDQ5EAYd4urHBGmxNbLBVGb79qFNBxVmLbi4", SELF).ok, false);
 });
 
 test("collateral accounting check matches the on-chain invariant", () => {
